@@ -1,0 +1,11 @@
+FROM postgres:17
+
+LABEL maintainer="okharch@gmail.com"
+LABEL description="PostgreSQL image with OpenFlights tables and data preloaded in /import"
+
+# Create /import and copy data files
+RUN mkdir -p /import
+COPY import/*.dat /import/
+
+# Run init SQL script on first container startup
+COPY 01_init_openflights.sql /docker-entrypoint-initdb.d/
