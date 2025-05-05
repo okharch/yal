@@ -1,34 +1,53 @@
+# Variables
 IMAGE_NAME=postgres-openflights
-CONTAINER_NAME=postgres-openflights-db
-POSTGRES_PASSWORD=mysecretpassword
-PORT=5433
+CONTAINER_NAME=postgres-openflights
+POSTGRES_PORT=5433
+SUBSCRIPTIONS_DIR=../cmd/mock_subscriptions
 
-# Build Docker image
+.PHONY: build run clean rebuild psql logs shell status go-run-subscriptions ingest
+
+## 🔧 Docker build & run
 build:
 	docker build -t $(IMAGE_NAME) .
 
-# Run the container
 run:
-	docker run --name $(CONTAINER_NAME) \
-		-e POSTGRES_PASSWORD=$(POSTGRES_PASSWORD) \
-		-p $(PORT):5432 \
-		-d $(IMAGE_NAME)
+	docker run -d \
+		--name $(CONTAINER_NAME) \
+		-p $(POSTGRES_PORT):5432 \
+		-e POSTGRES_USER=postgres \
+		-e POSTGRES_DB=postgres \
+		-e POSTGRES_HOST_AUTH_METHOD=trust \
+		$(IMAGE_NAME)
 
-# Stop and remove container
 clean:
 	docker rm -f $(CONTAINER_NAME) || true
 
-# Rebuild from scratch
-rebuild: clean build run
+## 🔁 Full rebuild and launch subscriptions
+rebuild: clean build run wait-for-db go-run-subscriptions
 
-# Show logs
+## 💻 Postgres & container tools
+psql:
+	psql -h localhost -p $(POSTGRES_PORT) -U postgres -d postgres
+
 logs:
 	docker logs -f $(CONTAINER_NAME)
+wait-for-db:
+	@echo "⏳ Waiting for PostgreSQL to be ready..."
+	@until pg_isready -h localhost -p $(POSTGRES_PORT) > /dev/null 2>&1; do \
+		sleep 0.5; \
+	done
+	@echo "✅ PostgreSQL is ready."
 
-# Enter psql shell (requires psql installed locally)
-psql:
-	psql -h localhost -p $(PORT) -U postgres
 
-# Show container status
+shell:
+	docker exec -it $(CONTAINER_NAME) bash
+
 status:
 	docker ps -f name=$(CONTAINER_NAME)
+
+## 🧪 Run mock subscriptions service
+go-run-subscriptions:
+	go run $(SUBSCRIPTIONS_DIR)
+
+ingest:
+	go run ../cmd/mock_ingest/mock_ingest.go

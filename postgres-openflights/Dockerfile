@@ -8,4 +8,4 @@ RUN mkdir -p /import
 COPY import/*.dat /import/
 
 # Run init SQL script on first container startup
-COPY 01_init_openflights.sql /docker-entrypoint-initdb.d/
+COPY initdb/*.sql /docker-entrypoint-initdb.d/
