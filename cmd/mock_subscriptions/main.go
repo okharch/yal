@@ -4,11 +4,19 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"math/rand"
+	"time"
 
 	_ "github.com/lib/pq"
 )
 
+const (
+	numMockUsers = 1000
+)
+
 func main() {
+	rand.Seed(time.Now().UnixNano())
+
 	pgDSN := "postgresql://postgres@localhost:5433/postgres?sslmode=disable"
 	db, err := sql.Open("postgres", pgDSN)
 	if err != nil {
@@ -31,20 +39,16 @@ func main() {
 	}
 	defer rows.Close()
 
-	var unionParts []string
-
+	var subscriptionIDs []int
 	for rows.Next() {
 		var airportID int
 		var airportName string
-
 		if err := rows.Scan(&airportID, &airportName); err != nil {
 			log.Fatal(err)
 		}
 
 		subscriptionID := airportID
 		viewName := fmt.Sprintf("subscription_%d", subscriptionID)
-
-		// 2. Create the view for this subscription using active_flights
 		viewSQL := fmt.Sprintf(`
 			CREATE OR REPLACE VIEW %s AS
 			SELECT id AS flight_id, source_airport_id, destination_airport_id
@@ -56,41 +60,75 @@ func main() {
 			log.Fatalf("Error creating view %s: %v", viewName, err)
 		}
 
-		// 3. Insert into subscriptions table
 		insertSubSQL := `INSERT INTO subscriptions (id, name, view_name) VALUES ($1, $2, $3)
 			ON CONFLICT (id) DO NOTHING`
 		if _, err := db.Exec(insertSubSQL, subscriptionID, airportName, viewName); err != nil {
 			log.Fatalf("Error inserting subscription %d: %v", subscriptionID, err)
 		}
 
-		// 4. Prepare for union
-		unionParts = append(unionParts,
-			fmt.Sprintf("SELECT %d AS subscription_id, flight_id, source_airport_id, destination_airport_id FROM %s",
-				subscriptionID, viewName))
+		subscriptionIDs = append(subscriptionIDs, subscriptionID)
 	}
 
-	// 5. Create the union view
-	unionSQL := fmt.Sprintf(`CREATE OR REPLACE VIEW flight_to_subscription_id AS
-%s;`, joinWithUnionAll(unionParts))
+	log.Println("✅ Subscriptions and views created.")
 
-	if _, err := db.Exec(unionSQL); err != nil {
-		log.Fatalf("Error creating flight_to_subscription_id view: %v", err)
-	}
-
-	log.Println("✅ All demo subscriptions and views created successfully.")
-}
-
-func joinWithUnionAll(parts []string) string {
-	return "  " + join(parts, "\nUNION ALL\n  ")
-}
-
-func join(parts []string, sep string) string {
-	out := ""
-	for i, part := range parts {
-		if i > 0 {
-			out += sep
+	// 2. Insert mock users
+	log.Println("Inserting users...")
+	for i := 1; i <= numMockUsers; i++ {
+		_, err := db.Exec(`INSERT INTO users (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING`, i, fmt.Sprintf("User %d", i))
+		if err != nil {
+			log.Fatalf("Error inserting user %d: %v", i, err)
 		}
-		out += part
 	}
-	return out
+
+	// 3. Assign one random subscription to each user
+	log.Println("Assigning one subscription per user...")
+	for userID := 1; userID <= numMockUsers; userID++ {
+		subID := subscriptionIDs[rand.Intn(len(subscriptionIDs))]
+		_, err := db.Exec(`INSERT INTO user_subscriptions (user_id, subscription_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, userID, subID)
+		if err != nil {
+			log.Printf("Error assigning subscription %d to user %d: %v", subID, userID, err)
+		}
+	}
+
+	// 4. Fetch all conditions
+	log.Println("Fetching conditions...")
+	condRows, err := db.Query(`SELECT id FROM conditions`)
+	if err != nil {
+		log.Fatal("Failed to fetch conditions:", err)
+	}
+	var conditionIDs []int
+	for condRows.Next() {
+		var cid int
+		if err := condRows.Scan(&cid); err != nil {
+			log.Fatal(err)
+		}
+		conditionIDs = append(conditionIDs, cid)
+	}
+	condRows.Close()
+
+	// 5. Insert user_subscription_conditions for each user_subscription
+	log.Println("Creating user_subscription_conditions...")
+	userSubRows, err := db.Query(`SELECT id FROM user_subscriptions`)
+	if err != nil {
+		log.Fatal("Failed to fetch user_subscriptions:", err)
+	}
+	defer userSubRows.Close()
+
+	for userSubRows.Next() {
+		var userSubID int
+		if err := userSubRows.Scan(&userSubID); err != nil {
+			log.Fatal(err)
+		}
+		for _, condID := range conditionIDs {
+			_, err := db.Exec(`
+				INSERT INTO user_subscription_conditions (user_subscription_id, condition_id, is_on, last_changed_at)
+				VALUES ($1, $2, true, now())
+				ON CONFLICT DO NOTHING`, userSubID, condID)
+			if err != nil {
+				log.Printf("Failed to insert condition %d for user_subscription %d: %v", condID, userSubID, err)
+			}
+		}
+	}
+
+	log.Println("✅ All users, subscriptions, and conditions are successfully populated.")
 }
