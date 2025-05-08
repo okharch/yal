@@ -1,13 +1,14 @@
 package main
 
 import (
-	"database/sql"
+	"context"
 	"fmt"
 	"log"
 	"math/rand"
 	"time"
 
-	_ "github.com/lib/pq"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const (
@@ -15,17 +16,17 @@ const (
 )
 
 func main() {
-	rand.Seed(time.Now().UnixNano())
+	ctx := context.Background()
 
 	pgDSN := "postgresql://postgres@localhost:5433/postgres?sslmode=disable"
-	db, err := sql.Open("postgres", pgDSN)
+	dbpool, err := pgxpool.New(ctx, pgDSN)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer db.Close()
+	defer dbpool.Close()
 
 	// 1. Get top 30 destination airports in the U.S.
-	rows, err := db.Query(`
+	rows, err := dbpool.Query(ctx, `
 		SELECT a.id, a.name
 		FROM routes r
 		JOIN airports a ON r.destination_airport_id = a.id
@@ -41,58 +42,71 @@ func main() {
 
 	var subscriptionIDs []int
 	for rows.Next() {
-		var airportID int
-		var airportName string
-		if err := rows.Scan(&airportID, &airportName); err != nil {
+		var id int
+		var name string
+		if err := rows.Scan(&id, &name); err != nil {
 			log.Fatal(err)
 		}
 
-		subscriptionID := airportID
-		viewName := fmt.Sprintf("subscription_%d", subscriptionID)
+		viewName := fmt.Sprintf("subscription_%d", id)
 		viewSQL := fmt.Sprintf(`
 			CREATE OR REPLACE VIEW %s AS
 			SELECT id AS flight_id, source_airport_id, destination_airport_id
 			FROM active_flights
-			WHERE destination_airport_id = %d;`,
-			viewName, airportID)
+			WHERE destination_airport_id = %d;
+		`, viewName, id)
 
-		if _, err := db.Exec(viewSQL); err != nil {
+		if _, err := dbpool.Exec(ctx, viewSQL); err != nil {
 			log.Fatalf("Error creating view %s: %v", viewName, err)
 		}
 
-		insertSubSQL := `INSERT INTO subscriptions (id, name, view_name) VALUES ($1, $2, $3)
-			ON CONFLICT (id) DO NOTHING`
-		if _, err := db.Exec(insertSubSQL, subscriptionID, airportName, viewName); err != nil {
-			log.Fatalf("Error inserting subscription %d: %v", subscriptionID, err)
+		if _, err := dbpool.Exec(ctx, `
+			INSERT INTO subscriptions (id, name, view_name)
+			VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING
+		`, id, name, viewName); err != nil {
+			log.Fatalf("Error inserting subscription %d: %v", id, err)
 		}
 
-		subscriptionIDs = append(subscriptionIDs, subscriptionID)
+		subscriptionIDs = append(subscriptionIDs, id)
 	}
-
 	log.Println("✅ Subscriptions and views created.")
 
-	// 2. Insert mock users
-	log.Println("Inserting users...")
+	// 2. Collect mock users
+	log.Println("Preparing users...")
+	users := make([][]any, 0, numMockUsers)
 	for i := 1; i <= numMockUsers; i++ {
-		_, err := db.Exec(`INSERT INTO users (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING`, i, fmt.Sprintf("User %d", i))
-		if err != nil {
-			log.Fatalf("Error inserting user %d: %v", i, err)
-		}
+		users = append(users, []any{i, fmt.Sprintf("User %d", i)})
 	}
 
-	// 3. Assign one random subscription to each user
-	log.Println("Assigning one subscription per user...")
+	_, err = dbpool.CopyFrom(ctx,
+		pgx.Identifier{"users"},
+		[]string{"id", "name"},
+		pgx.CopyFromRows(users),
+	)
+	if err != nil {
+		log.Fatalf("Error bulk inserting users: %v", err)
+	}
+
+	// 3. Assign each user to one random subscription
+	log.Println("Preparing user_subscriptions...")
+	userSubs := make([][]any, 0, numMockUsers)
 	for userID := 1; userID <= numMockUsers; userID++ {
 		subID := subscriptionIDs[rand.Intn(len(subscriptionIDs))]
-		_, err := db.Exec(`INSERT INTO user_subscriptions (user_id, subscription_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, userID, subID)
-		if err != nil {
-			log.Printf("Error assigning subscription %d to user %d: %v", subID, userID, err)
-		}
+		userSubs = append(userSubs, []any{userID, subID})
+	}
+
+	_, err = dbpool.CopyFrom(ctx,
+		pgx.Identifier{"user_subscriptions"},
+		[]string{"user_id", "subscription_id"},
+		pgx.CopyFromRows(userSubs),
+	)
+	if err != nil {
+		log.Fatalf("Error bulk inserting user_subscriptions: %v", err)
 	}
 
 	// 4. Fetch all conditions
 	log.Println("Fetching conditions...")
-	condRows, err := db.Query(`SELECT id FROM conditions`)
+	condRows, err := dbpool.Query(ctx, `SELECT id FROM conditions`)
 	if err != nil {
 		log.Fatal("Failed to fetch conditions:", err)
 	}
@@ -106,13 +120,17 @@ func main() {
 	}
 	condRows.Close()
 
-	// 5. Insert user_subscription_conditions for each user_subscription
-	log.Println("Creating user_subscription_conditions...")
-	userSubRows, err := db.Query(`SELECT id FROM user_subscriptions`)
+	// 5. Fetch all user_subscription IDs
+	log.Println("Fetching user_subscription IDs...")
+	userSubRows, err := dbpool.Query(ctx, `SELECT id FROM user_subscriptions`)
 	if err != nil {
 		log.Fatal("Failed to fetch user_subscriptions:", err)
 	}
 	defer userSubRows.Close()
+
+	log.Println("Preparing user_subscription_conditions...")
+	uscRows := make([][]any, 0, len(conditionIDs)*numMockUsers)
+	now := time.Now()
 
 	for userSubRows.Next() {
 		var userSubID int
@@ -120,15 +138,18 @@ func main() {
 			log.Fatal(err)
 		}
 		for _, condID := range conditionIDs {
-			_, err := db.Exec(`
-				INSERT INTO user_subscription_conditions (user_subscription_id, condition_id, is_on, last_changed_at)
-				VALUES ($1, $2, true, now())
-				ON CONFLICT DO NOTHING`, userSubID, condID)
-			if err != nil {
-				log.Printf("Failed to insert condition %d for user_subscription %d: %v", condID, userSubID, err)
-			}
+			uscRows = append(uscRows, []any{userSubID, condID, true, now})
 		}
 	}
 
-	log.Println("✅ All users, subscriptions, and conditions are successfully populated.")
+	_, err = dbpool.CopyFrom(ctx,
+		pgx.Identifier{"user_subscription_conditions"},
+		[]string{"user_subscription_id", "condition_id", "is_on", "last_changed_at"},
+		pgx.CopyFromRows(uscRows),
+	)
+	if err != nil {
+		log.Fatalf("Error bulk inserting user_subscription_conditions: %v", err)
+	}
+
+	log.Println("✅ All mock users, subscriptions, and conditions populated efficiently.")
 }
