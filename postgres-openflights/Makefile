@@ -17,6 +17,8 @@ run:
 		-e POSTGRES_USER=postgres \
 		-e POSTGRES_DB=postgres \
 		-e POSTGRES_HOST_AUTH_METHOD=trust \
+		-e TZ=$(shell cat /etc/timezone) \
+		-v /etc/localtime:/etc/localtime:ro \
 		$(IMAGE_NAME)
 
 clean:
