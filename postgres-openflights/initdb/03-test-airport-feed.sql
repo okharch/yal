@@ -90,8 +90,8 @@ WITH most_active_airport AS (
 -- Insert alert_conditions
 -- ==========================
 
--- Insert alert_conditions with current timestamp for received_at
+-- Insert alert_conditions with current TIMESTAMPTZ for received_at
 INSERT INTO alert_conditions (condition_id, target_id, value, received_at)
-SELECT condition_id, target_id, value, CURRENT_TIMESTAMP AT TIME ZONE 'UTC'  FROM airport_conditions
+SELECT condition_id, target_id, value, now()  FROM airport_conditions
 UNION ALL
-SELECT condition_id, target_id, value, CURRENT_TIMESTAMP AT TIME ZONE 'UTC'  FROM flight_conditions;
+SELECT condition_id, target_id, value, now()  FROM flight_conditions;

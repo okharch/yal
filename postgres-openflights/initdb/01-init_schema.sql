@@ -71,8 +71,8 @@ CREATE TABLE flights (
                          flight_number TEXT NOT NULL,
                          source_airport_id INTEGER NOT NULL,
                          destination_airport_id INTEGER NOT NULL,
-                         departure_time TIMESTAMP NOT NULL,
-                         arrival_time TIMESTAMP NOT NULL,
+                         departure_time TIMESTAMPTZ NOT NULL,
+                         arrival_time TIMESTAMPTZ NOT NULL,
                          status flight_status NOT NULL
 );
 
@@ -105,9 +105,9 @@ CREATE TABLE alert_conditions (
                                   condition_id INT NOT NULL REFERENCES conditions(id),
                                   target_id INT NOT NULL, -- ID of flight or airport
                                   value INT NOT NULL,
-            received_at TIMESTAMP not null,
-                                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP AT TIME ZONE 'UTC' ,
-                                  processed_at TIMESTAMP
+            received_at TIMESTAMPTZ not null,
+                                  created_at  TIMESTAMPTZ DEFAULT now() ,
+                                  processed_at TIMESTAMPTZ
 );
 
 CREATE TABLE alerts (
@@ -116,7 +116,7 @@ CREATE TABLE alerts (
                         target_id INT NOT NULL,
                         alert_condition_id INT NOT NULL REFERENCES alert_conditions(id),
                         is_on BOOL NOT NULL,
-                        updated_at TIMESTAMP NOT NULL default CURRENT_TIMESTAMP AT TIME ZONE 'UTC' ,
+                        updated_at TIMESTAMPTZ NOT NULL default now(),
                         UNIQUE (condition_id, target_id)
 );
 
@@ -158,10 +158,10 @@ BEGIN
         SET
             alert_condition_id = EXCLUDED.alert_condition_id,
             is_on = EXCLUDED.is_on,
-            updated_at = CURRENT_TIMESTAMP AT TIME ZONE 'UTC' ;
+            updated_at = clock_timestamp();
 
     UPDATE alert_conditions
-    SET processed_at = CURRENT_TIMESTAMP AT TIME ZONE 'UTC'
+    SET processed_at = clock_timestamp()
     WHERE id = NEW.id;
 
     RETURN NEW;
@@ -279,8 +279,8 @@ CREATE TABLE subscriptions (
                                id INT PRIMARY KEY,
                                name TEXT NOT NULL,
                                view_name TEXT NOT NULL,
-    start_update TIMESTAMP,
-    finish_update TIMESTAMP
+    start_update TIMESTAMPTZ,
+    finish_update TIMESTAMPTZ
 );
 
 create table user_subscriptions
@@ -288,6 +288,6 @@ create table user_subscriptions
     id SERIAL PRIMARY KEY,
     user_id         INT NOT NULL,
     subscription_id INT NOT NULL REFERENCES subscriptions (id),
-    updated_at     TIMESTAMP DEFAULT now() -- set when all alerts triggers processed according to this data
+    updated_at     TIMESTAMPTZ DEFAULT now() -- set when all alerts triggers processed according to this data
 );
 
