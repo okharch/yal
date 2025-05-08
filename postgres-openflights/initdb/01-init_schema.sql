@@ -120,6 +120,40 @@ CREATE TABLE alerts (
                         UNIQUE (condition_id, target_id)
 );
 
+CREATE INDEX idx_alerts_alert_condition_id ON alerts(alert_condition_id); -- for performance in trigger function
+
+CREATE OR REPLACE FUNCTION trg_handle_alert_conditions_batch()
+    RETURNS TRIGGER AS $$
+DECLARE
+    affected_user_subscriptions INTEGER[];
+BEGIN
+    -- 1. Delete orphaned alert_conditions that are not used in alerts
+    DELETE FROM alert_conditions ac
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM alerts a
+        WHERE a.alert_condition_id = ac.id -- idx_alerts_alert_condition_id
+    );
+
+    -- 2. Determine affected user subscriptions from the newly inserted alert_conditions
+    -- Assuming you can get user_subscription_id via condition_id mapping
+    SELECT ARRAY_AGG(DISTINCT usc.user_subscription_id)
+    INTO affected_user_subscriptions
+    FROM new_table ac
+             JOIN user_subscription_conditions usc
+                  ON usc.condition_id = ac.condition_id;
+
+    -- 3. Notify backend for each affected user_subscription
+    PERFORM pg_notify(
+            'alerts_update',
+            json_build_object('user_subscription_ids', affected_user_subscriptions)::text
+            );
+
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+
 -- =============
 -- Views
 -- =============
@@ -150,10 +184,7 @@ BEGIN
          JOIN condition_templates ct ON ct.id = c.template_id
          LEFT JOIN alerts a ON a.condition_id = c.id AND a.target_id = NEW.target_id
     WHERE c.id = NEW.condition_id
-      AND (
-        a.id IS NULL
-            OR a.is_on IS DISTINCT FROM (NEW.value >= c.threshold)
-        )
+      AND a.is_on IS DISTINCT FROM (NEW.value >= c.threshold)
     ON CONFLICT (condition_id, target_id) DO UPDATE
         SET
             alert_condition_id = EXCLUDED.alert_condition_id,
@@ -274,6 +305,12 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+CREATE TABLE users(
+                     id SERIAL PRIMARY KEY,
+                     name TEXT NOT NULL,
+                     created_at TIMESTAMPTZ DEFAULT now()
+);
+
 
 CREATE TABLE subscriptions (
                                id INT PRIMARY KEY,
@@ -286,8 +323,43 @@ CREATE TABLE subscriptions (
 create table user_subscriptions
 (
     id SERIAL PRIMARY KEY,
-    user_id         INT NOT NULL,
+    user_id         INT NOT NULL references users (id),
     subscription_id INT NOT NULL REFERENCES subscriptions (id),
-    updated_at     TIMESTAMPTZ DEFAULT now() -- set when all alerts triggers processed according to this data
+    unique (user_id, subscription_id),
+    pushed_at     TIMESTAMPTZ NULL -- when the subscription's alerts were pushed to the user
 );
 
+create table user_subscription_conditions
+(
+    id SERIAL PRIMARY KEY,
+    user_subscription_id INT NOT NULL REFERENCES user_subscriptions (id),
+    condition_id        INT NOT NULL references conditions (id),
+    unique (user_subscription_id, condition_id),
+    is_on              BOOL NOT NULL,
+    last_changed_at TIMESTAMPTZ
+);
+
+-- Trigger function
+CREATE OR REPLACE FUNCTION notify_subscription_condition_change()
+    RETURNS TRIGGER AS $$
+DECLARE
+    payload JSON;
+BEGIN
+    -- Construct a simple JSON payload with the ID
+    payload := json_build_object(
+            'user_subscription_condition_id', NEW.id,
+            'is_on', NEW.is_on
+               );
+
+    PERFORM pg_notify('subscription_condition_changes', payload::text);
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Trigger itself
+CREATE TRIGGER trg_notify_subscription_condition_change
+    AFTER UPDATE OF is_on ON user_subscription_conditions
+    FOR EACH ROW
+    WHEN (OLD.is_on IS DISTINCT FROM NEW.is_on)
+EXECUTE FUNCTION notify_subscription_condition_change();
