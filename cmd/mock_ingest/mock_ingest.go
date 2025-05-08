@@ -70,7 +70,7 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	go insertAlertCondition(ctx)
+	go ingestAlertCondition(ctx)
 
 	// Handle Ctrl-C
 	sigs := make(chan os.Signal, 1)
@@ -223,7 +223,7 @@ func processTargets(ctx context.Context, f FlightTarget) {
 		{f.DestAirport, "airport"},
 	}
 	for _, t := range targets {
-		mockInsertAlertCondition(ctx, t.id, t.kind)
+		generateAlertCondition(ctx, t.id, t.kind)
 	}
 }
 
@@ -233,24 +233,25 @@ const bufferSize = 70000
 //
 //	                      target_id INT NOT NULL, -- ID of flight or airport
 //	                      value INT NOT NULL,
-//	received_at TIMESTAMP not null,
+//	received_at TIMESTAMPTZ not null,
 var alertConditions = make(chan []interface{}, bufferSize*3)
 
 //
 
-func mockInsertAlertCondition(ctx context.Context, targetID int, targetType string) {
+func generateAlertCondition(ctx context.Context, targetID int, targetType string) {
 	for _, ct := range conditionTemplates {
 		if ctx.Err() != nil {
+			log.Printf("context done, exiting generateAlertCondition")
 			return
 		}
 		if ct.TargetType != targetType {
 			continue
 		}
 		val := generateStickyMockValue(targetID, targetType, ct)
-		alertConditions <- []interface{}{ct.ID, targetID, val, time.Now().UTC()}
+		alertConditions <- []interface{}{ct.ID, targetID, val, time.Now()}
 	}
 }
-func insertAlertCondition(ctx context.Context) {
+func ingestAlertCondition(ctx context.Context) {
 	const flushInterval = 200 * time.Millisecond
 	config, err := pgxpool.ParseConfig(dbConnStr)
 	if err != nil {
@@ -291,6 +292,7 @@ func insertAlertCondition(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			// no flush needed in simulation mode
+			log.Printf("context done, exiting ingestAlertCondition")
 			return
 
 		case values, ok := <-alertConditions:
