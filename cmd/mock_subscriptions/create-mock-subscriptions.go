@@ -1,3 +1,4 @@
+// File: cmd/mock_subscriptions/mock-alerts.go
 package main
 
 import (
@@ -5,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -25,8 +27,11 @@ func main() {
 	}
 	defer dbpool.Close()
 
+	var subscriptionIDs []int
+	var targetViewParts []string
+
 	// 1. Get top 30 destination airports in the U.S.
-	rows, err := dbpool.Query(ctx, `
+	routes, err := dbpool.Query(ctx, `
 		SELECT a.id, a.name
 		FROM routes r
 		JOIN airports a ON r.destination_airport_id = a.id
@@ -38,13 +43,12 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer rows.Close()
+	defer routes.Close()
 
-	var subscriptionIDs []int
-	for rows.Next() {
+	for routes.Next() {
 		var id int
 		var name string
-		if err := rows.Scan(&id, &name); err != nil {
+		if err := routes.Scan(&id, &name); err != nil {
 			log.Fatal(err)
 		}
 
@@ -68,8 +72,27 @@ func main() {
 		}
 
 		subscriptionIDs = append(subscriptionIDs, id)
+
+		targetViewParts = append(targetViewParts, fmt.Sprintf(`
+		SELECT %d AS subscription_id, flight_id AS target_id, 'flight'::target_type AS target_type FROM %s
+		UNION ALL
+		SELECT %d, source_airport_id, 'source_airport'::target_type FROM %s
+		UNION ALL
+		SELECT %d, destination_airport_id, 'destination_airport'::target_type FROM %s
+		`, id, viewName, id, viewName, id, viewName))
 	}
-	log.Println("✅ Subscriptions and views created.")
+
+	// 1b. Create aggregated subscription_targets_view
+	viewBody := strings.Join(targetViewParts, "\nUNION ALL\n")
+	targetsViewSQL := fmt.Sprintf(`
+		CREATE OR REPLACE VIEW subscription_targets_view AS
+		%s
+	`, viewBody)
+	if _, err := dbpool.Exec(ctx, targetsViewSQL); err != nil {
+		log.Fatalf("Error creating subscription_targets_view: %v", err)
+	}
+
+	log.Println("✅ Subscriptions, views, and subscription_targets_view created.")
 
 	// 2. Collect mock users
 	log.Println("Preparing users...")

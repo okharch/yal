@@ -19,6 +19,7 @@ run:
 		-e POSTGRES_HOST_AUTH_METHOD=trust \
 		-e TZ=$(shell cat /etc/timezone) \
 		-v /etc/localtime:/etc/localtime:ro \
+		--tmpfs /ramdisk:rw,size=512m,uid=999,gid=999 \
 		$(IMAGE_NAME)
 
 clean:
@@ -52,4 +53,4 @@ go-run-subscriptions:
 	go run $(SUBSCRIPTIONS_DIR)
 
 ingest:
-	go run ../cmd/mock_ingest/mock_ingest.go
+	go run ../cmd/mock_alerts

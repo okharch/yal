@@ -1,46 +1,21 @@
-package main
+package mock_alerts
 
 import (
 	"context"
 	"database/sql"
 	"fmt"
-	"github.com/jackc/pgx/v4"
-	"github.com/jackc/pgx/v4/pgxpool"
+	"github.com/okharch/yal/ingest_alerts"
+	"github.com/okharch/yal/model"
 	"log"
 	"math/rand"
-	"os"
-	"os/signal"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
-
-	_ "github.com/lib/pq"
 )
 
 const (
-	dbConnStr    = "postgresql://postgres@localhost:5433/postgres?sslmode=disable"
-	ingestPeriod = 10 * time.Second
+	ingestPeriod = 12 * time.Second
 )
-
-type Subscription struct {
-	ID       int
-	Name     string
-	ViewName string
-}
-
-type FlightTarget struct {
-	FlightID      int
-	SourceAirport int
-	DestAirport   int
-}
-
-type ConditionTemplate struct {
-	ID         int
-	TargetType string
-	Threshold  int
-	Name       string
-}
 
 type alertState struct {
 	isOn      bool
@@ -50,13 +25,12 @@ type alertState struct {
 var (
 	db                 *sql.DB
 	wg                 sync.WaitGroup
-	conditionTemplates []ConditionTemplate
+	conditionTemplates []model.ConditionTemplate
 	alertStatus        = make(map[string]alertState)
 	alertStatusLock    sync.Mutex
 )
 
-func main() {
-
+func GenerateMockAlerts(ctx context.Context, dbConnStr string) {
 	var err error
 	db, err = sql.Open("postgres", dbConnStr)
 	if err != nil {
@@ -64,46 +38,25 @@ func main() {
 	}
 	defer db.Close()
 
-	if err := loadConditionTemplates(); err != nil {
+	if err := LoadConditionTemplates(); err != nil {
 		log.Fatalf("failed to load condition templates: %v", err)
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-
-	go ingestAlertCondition(ctx)
-
-	// Handle Ctrl-C
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		<-sigs
-		log.Println("Stopping ingestion...")
-		cancel()
-	}()
-
 	ticker := time.NewTicker(ingestPeriod)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-ctx.Done():
-			wg.Wait()
-			return
-		default:
-			runIngestionCycle(ctx)
-		}
-
-		select {
 		case <-ticker.C:
-			continue
+			runIngestionCycle(ctx)
 		case <-ctx.Done():
 			wg.Wait()
 			return
 		}
 	}
+
 }
 
-func loadConditionTemplates() error {
+func LoadConditionTemplates() error {
 	rows, err := db.Query(`
 		SELECT c.id, t.target_type, c.threshold, t.name
 		FROM conditions c
@@ -115,7 +68,7 @@ func loadConditionTemplates() error {
 	defer rows.Close()
 
 	for rows.Next() {
-		var ct ConditionTemplate
+		var ct model.ConditionTemplate
 		if err := rows.Scan(&ct.ID, &ct.TargetType, &ct.Threshold, &ct.Name); err != nil {
 			return err
 		}
@@ -124,8 +77,6 @@ func loadConditionTemplates() error {
 	return nil
 }
 
-var everythingFlushed = make(chan struct{})
-
 func runIngestionCycle(ctx context.Context) {
 	start := time.Now()
 	subs, err := fetchSubscriptions()
@@ -133,35 +84,31 @@ func runIngestionCycle(ctx context.Context) {
 		log.Printf("error fetching subscriptions: %v", err)
 		return
 	}
+	log.Printf("Starting generating mock data...")
 	var counter atomic.Int32
 	for _, sub := range subs {
 		wg.Add(1)
-		go func(sub Subscription) {
+		go func(sub model.Subscription) {
 			defer wg.Done()
 			counter.Add(int32(processSubscription(ctx, sub)))
 		}(sub)
 	}
-	// empty everythingFlushed channel, non-blocking
-	select {
-	case <-everythingFlushed:
-	default:
-	}
 	wg.Wait()
-	// wait for all alert conditions to be flushed
-	<-everythingFlushed
+	ingest_alerts.AlertData <- nil // EOF
+	<-ingest_alerts.AlertsFlushed  // wait until it flushed
 	log.Printf("Processed %d flights in %s", counter.Load(), time.Since(start))
 }
 
-func fetchSubscriptions() ([]Subscription, error) {
+func fetchSubscriptions() ([]model.Subscription, error) {
 	rows, err := db.Query(`SELECT id, name, view_name FROM subscriptions`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var subs []Subscription
+	var subs []model.Subscription
 	for rows.Next() {
-		var s Subscription
+		var s model.Subscription
 		if err := rows.Scan(&s.ID, &s.Name, &s.ViewName); err != nil {
 			return nil, err
 		}
@@ -170,7 +117,7 @@ func fetchSubscriptions() ([]Subscription, error) {
 	return subs, nil
 }
 
-func processSubscription(ctx context.Context, sub Subscription) int {
+func processSubscription(ctx context.Context, sub model.Subscription) int {
 	//start := time.Now()
 	_, _ = db.Exec(`UPDATE subscriptions SET start_update = now() WHERE id = $1`, sub.ID)
 
@@ -182,7 +129,7 @@ func processSubscription(ctx context.Context, sub Subscription) int {
 	var wg sync.WaitGroup
 	for _, flight := range flights {
 		wg.Add(1)
-		go func(f FlightTarget) {
+		go func(f model.FlightTarget) {
 			defer wg.Done()
 			processTargets(ctx, flight)
 		}(flight)
@@ -195,16 +142,16 @@ func processSubscription(ctx context.Context, sub Subscription) int {
 	return len(flights)
 }
 
-func fetchFlights(viewName string) ([]FlightTarget, error) {
+func fetchFlights(viewName string) ([]model.FlightTarget, error) {
 	rows, err := db.Query(fmt.Sprintf(`SELECT flight_id, source_airport_id, destination_airport_id FROM %s`, viewName))
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var flights []FlightTarget
+	var flights []model.FlightTarget
 	for rows.Next() {
-		var f FlightTarget
+		var f model.FlightTarget
 		if err := rows.Scan(&f.FlightID, &f.SourceAirport, &f.DestAirport); err != nil {
 			return nil, err
 		}
@@ -213,28 +160,25 @@ func fetchFlights(viewName string) ([]FlightTarget, error) {
 	return flights, nil
 }
 
-func processTargets(ctx context.Context, f FlightTarget) {
+func processTargets(ctx context.Context, f model.FlightTarget) {
 	targets := []struct {
 		id   int
 		kind string
 	}{
 		{f.FlightID, "flight"},
-		{f.SourceAirport, "airport"},
-		{f.DestAirport, "airport"},
+		{f.SourceAirport, "source_airport"},
+		{f.DestAirport, "destination_airport"},
 	}
 	for _, t := range targets {
 		generateAlertCondition(ctx, t.id, t.kind)
 	}
 }
 
-const bufferSize = 70000
-
 // row of                                   condition_id INT NOT NULL REFERENCES conditions(id),
 //
 //	                      target_id INT NOT NULL, -- ID of flight or airport
 //	                      value INT NOT NULL,
 //	received_at TIMESTAMPTZ not null,
-var alertConditions = make(chan []interface{}, bufferSize*3)
 
 //
 
@@ -248,70 +192,12 @@ func generateAlertCondition(ctx context.Context, targetID int, targetType string
 			continue
 		}
 		val := generateStickyMockValue(targetID, targetType, ct)
-		alertConditions <- []interface{}{ct.ID, targetID, val, time.Now()}
-	}
-}
-func ingestAlertCondition(ctx context.Context) {
-	const flushInterval = 200 * time.Millisecond
-	config, err := pgxpool.ParseConfig(dbConnStr)
-	if err != nil {
-		// ...
-	}
-	pgxPool, err := pgxpool.ConnectConfig(context.Background(), config)
-	if err != nil {
-		log.Fatalf("failed to connect to database: %v", err)
-	}
-	defer pgxPool.Close()
-
-	rows := make([][]interface{}, 0, bufferSize)
-
-	flush := func() {
-		if len(rows) == 0 {
-			// non blocking send to avoid blocking the main loop
-			select {
-			case everythingFlushed <- struct{}{}:
-			default:
-			}
-			return
-		}
-		start := time.Now()
-		_, err := pgxPool.CopyFrom(
-			ctx,
-			pgx.Identifier{"alert_conditions"},
-			[]string{"condition_id", "target_id", "value", "received_at"},
-			pgx.CopyFromRows(rows),
-		)
-		if err != nil {
-			log.Printf("failed to insert alert conditions: %v", err)
-		}
-		log.Printf("flushed %d alert conditions in %s", len(rows), time.Since(start))
-		rows = rows[:0] // reset buffer
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			// no flush needed in simulation mode
-			log.Printf("context done, exiting ingestAlertCondition")
-			return
-
-		case values, ok := <-alertConditions:
-			if !ok {
-				flush()
-				return
-			}
-			rows = append(rows, values)
-			if len(rows) >= bufferSize {
-				flush()
-			}
-
-		case <-time.After(flushInterval):
-			flush()
-		}
+		// []string{"condition_id", "target_id", "is_on", "payload", "received_at"},
+		ingest_alerts.AlertData <- []interface{}{ct.ID, targetID, val > ct.Threshold, `{"helper": "mock"}`, time.Now()}
 	}
 }
 
-func generateStickyMockValue(targetID int, targetType string, ct ConditionTemplate) int {
+func generateStickyMockValue(targetID int, targetType string, ct model.ConditionTemplate) int {
 	key := fmt.Sprintf("%s:%d:%d", targetType, targetID, ct.ID)
 	now := time.Now()
 	alertStatusLock.Lock()
