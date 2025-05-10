@@ -1,4 +1,4 @@
-FROM postgres:17
+FROM postgres:latest
 
 LABEL maintainer="okharch@gmail.com"
 LABEL description="PostgreSQL image with OpenFlights tables and data preloaded in /import"
