@@ -8,15 +8,14 @@ import (
 	"time"
 )
 
-const bufferSize = 70000
+const flushInterval = 500 * time.Millisecond
+const bufferSize = 50000
 
 // AlertData is a buffered channel for alert data ingestion
 var AlertData = make(chan []interface{}, bufferSize*3)
 var AlertsFlushed = make(chan struct{})
 
 func IngestAlertData(ctx context.Context, pgxPool *pgxpool.Pool) {
-	const flushInterval = 500 * time.Millisecond
-	const bufferSize = 50000
 
 	started := time.Now()
 	_, err := pgxPool.Exec(ctx, `

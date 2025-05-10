@@ -27,7 +27,7 @@ func fetchAlertsJSON(ctx context.Context, db *pgxpool.Pool, subscriptionId int) 
 }
 
 func ListenForSubscriptionUpdates(ctx context.Context, dbConnStr string, db *pgxpool.Pool) error {
-	conn, err := pgx.Connect(ctx, dbConnStr)
+	conn, err := pgx.Connect(ctx, dbConnStr) // this connection is used to listen for notifications
 	if err != nil {
 		return fmt.Errorf("failed to acquire DB connection: %w", err)
 	}

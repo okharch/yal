@@ -174,14 +174,6 @@ func processTargets(ctx context.Context, f model.FlightTarget) {
 	}
 }
 
-// row of                                   condition_id INT NOT NULL REFERENCES conditions(id),
-//
-//	                      target_id INT NOT NULL, -- ID of flight or airport
-//	                      value INT NOT NULL,
-//	received_at TIMESTAMPTZ not null,
-
-//
-
 func generateAlertCondition(ctx context.Context, targetID int, targetType string) {
 	for _, ct := range conditionTemplates {
 		if ctx.Err() != nil {

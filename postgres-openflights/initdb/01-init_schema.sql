@@ -145,13 +145,6 @@ create table user_subscriptions
     alerts_triggered_at TIMESTAMPTZ NULL -- when the subscription's alerts were triggered
 );
 
-create table user_subscription_push
-(
-    user_subscription_id INT NOT NULL REFERENCES user_subscriptions (id),
-    alerts_triggered_at TIMESTAMPTZ NULL, -- when the subscription's alerts were triggered
-    alerts_pushed_at TIMESTAMPTZ NULL -- when the subscription's alerts were pushed to the user
-);
-
 create table user_subscription_conditions
 (
     id SERIAL PRIMARY KEY,
