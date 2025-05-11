@@ -25,12 +25,6 @@ func main() {
 	}
 	defer pool.Close()
 
-	conn, err := pool.Acquire(ctx)
-	if err != nil {
-		log.Fatalf("failed to connect to database: %v", err)
-	}
-	defer conn.Release()
-
 	go ingest_alerts.IngestAlertData(ctx, pool)
 	go func() {
 		err := process_alerts.ListenForSubscriptionUpdates(ctx, dbConnStr, pool)
