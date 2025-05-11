@@ -155,19 +155,46 @@ create table user_subscription_conditions
     last_changed_at TIMESTAMPTZ
 );
 
+-- ================================================
+-- Function: notify_subscription_condition_change
+-- --------------------------------
+-- Purpose:
+--   Sends a lightweight notification when a user's
+--   subscription condition (`user_subscription_conditions.is_on`)
+--   is updated.
+--
+-- Use Case:
+--   When a user enables or disables a specific alert condition,
+--   this trigger informs the backend in real-time, allowing it to:
+--     - Reactively reload or clear active alerts
+--     - Update internal state or caches
+--     - Log user-initiated condition changes
+--
+-- Notification Channel:
+--   'subscription_condition_changes'
+--
+-- Payload Example:
+--   {
+--     "user_subscription_condition_id": 123,
+--     "is_on": true
+--   }
+-- ================================================
 CREATE OR REPLACE FUNCTION notify_subscription_condition_change()
     RETURNS TRIGGER AS $$
 DECLARE
     payload JSON;
 BEGIN
-    -- Construct a simple JSON payload with the ID
+    -- Construct a JSON payload containing the ID and new `is_on` status
     payload := json_build_object(
             'user_subscription_condition_id', NEW.id,
+            'user_subscription_id', NEW.user_subscription_id,
             'is_on', NEW.is_on
                );
 
+    -- Notify the backend listener via PostgreSQL pub/sub
     PERFORM pg_notify('subscription_condition_changes', payload::text);
 
+    -- Return the new row to complete the update
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
@@ -191,34 +218,6 @@ WHERE status IN ('scheduled', 'departed', 'delayed')
 CREATE OR REPLACE VIEW inactive_flights AS
 SELECT * FROM flights
 WHERE NOT (status IN ('scheduled', 'departed', 'delayed') AND arrival_time > now());
-
-CREATE TABLE subscription_targets(
-    subscription_id INT NOT NULL REFERENCES subscriptions (id),
-    target_id INT NOT NULL,
-    target_type target_type NOT NULL,
-    UNIQUE (subscription_id, target_id, target_type)
-);
-
-CREATE OR REPLACE VIEW user_subscription_new_alerts AS
-SELECT
-    us.id AS user_subscription_id,
-    usc.condition_id,
-    a.id AS alert_id,
-    a.target_id,
-    ct.target_type,
-    a.is_on,
-    a.payload,
-    a.updated_at,
-    us.pushed_at
-FROM alerts a
-         JOIN conditions c ON a.condition_id = c.id
-         JOIN condition_templates ct ON ct.id = c.template_id
-         JOIN user_subscription_conditions usc ON usc.condition_id = a.condition_id
-         JOIN user_subscriptions us ON us.id = usc.user_subscription_id
-         JOIN subscription_targets st ON st.target_id = a.target_id AND st.target_type = ct.target_type AND st.subscription_id = us.subscription_id
-WHERE usc.is_on = true
-  AND a.updated_at > COALESCE(us.pushed_at, '2000-01-01');
-
 
 -- Create function to truncate and regenerate flights
 CREATE OR REPLACE FUNCTION regenerate_flights()
@@ -280,60 +279,40 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE OR REPLACE FUNCTION schedule_next_day_flights()
-    RETURNS INTEGER AS $$
-DECLARE
-    scheduled_count INTEGER;
-BEGIN
-    WITH new_flights AS (
-        INSERT INTO flights (
-                             route_id,
-                             airline_id,
-                             flight_number,
-                             source_airport_id,
-                             destination_airport_id,
-                             departure_time,
-                             arrival_time,
-                             status
-            )
-            SELECT
-                f.route_id,
-                f.airline_id,
-                f.flight_number || '_D' || TO_CHAR(NOW() + INTERVAL '1 day', 'DD'),
-                f.source_airport_id,
-                f.destination_airport_id,
-                f.departure_time + INTERVAL '1 day',
-                f.arrival_time + INTERVAL '1 day',
-                'scheduled'
-            FROM flights f
-            WHERE f.status IN ('arrived', 'departed')
-              AND f.departure_time::date = CURRENT_DATE
-              AND NOT EXISTS (
-                SELECT 1 FROM flights fx
-                WHERE fx.route_id = f.route_id
-                  AND fx.departure_time::date = CURRENT_DATE + INTERVAL '1 day'
-            )
-            RETURNING *
-    )
-    SELECT COUNT(*) INTO scheduled_count FROM new_flights;
-
-    RETURN scheduled_count;
-END;
-$$ LANGUAGE plpgsql;
-
-
+0-- ================================================
+-- Procedure: process_alert_staging
+-- --------------------------------
+-- Purpose:
+--   - Efficiently process and merge alert condition changes
+--     from the high-speed alerts_staging table.
+--   - Only updates the 'alerts' table when 'is_on' status
+--     has changed.
+--   - Identifies and notifies affected user subscriptions.
+--   - Clears the staging table after processing.
+-- --------------------------------
+-- Performance Features:
+--   - Deduplication based on (condition_id, target_id)
+--   - Conflict resolution via conditional UPSERT
+--   - Operates entirely in-memory until final merge
+-- ================================================
 CREATE OR REPLACE PROCEDURE process_alert_staging()
     LANGUAGE plpgsql
 AS $$
 DECLARE
-    sub_ids INT[];  -- to store all affected subscription IDs
+    sub_ids INT[];  -- List of affected user_subscription IDs
 BEGIN
-    -- Step 1: Deduplicate and insert/update alerts, capturing changed ones
+    -- Step 1: Deduplicate incoming alert updates
+    -- Keep only the most recent (latest received_at) update
+    -- for each (condition_id, target_id) combination
     WITH deduped AS (
         SELECT DISTINCT ON (condition_id, target_id) *
         FROM alerts_staging
         ORDER BY condition_id, target_id, received_at DESC
     ),
+
+         -- Step 2: UPSERT into main alerts table
+         -- Only perform update if the 'is_on' state has changed
+         -- to avoid unnecessary writes and reduce database churn
          upserted AS (
              INSERT INTO alerts (condition_id, target_id, is_on, payload, received_at, updated_at)
                  SELECT
@@ -355,20 +334,26 @@ BEGIN
                  RETURNING alerts.id, alerts.condition_id, alerts.target_id
          )
 
-    -- Step 2: Collect affected subscription IDs into sub_ids array
+    -- Step 3: Identify affected user subscriptions
+    -- Only include subscriptions where the user actively listens (is_on = true)
     SELECT ARRAY(
                    SELECT DISTINCT usc.user_subscription_id
                    FROM upserted u
-                            JOIN user_subscription_conditions usc ON usc.condition_id = u.condition_id
-           )
-    INTO sub_ids;
+                            JOIN user_subscription_conditions usc
+                                 ON usc.condition_id = u.condition_id
+                   WHERE usc.is_on = true
+           ) INTO sub_ids;
 
-    -- Step 3: Update alerts_triggered_at for affected subscriptions
+    -- Step 4: Update alerts_triggered_at to mark activity
     UPDATE user_subscriptions us
     SET alerts_triggered_at = now()
     WHERE us.id = ANY(sub_ids);
 
-    -- Step 4: Send notification as one JSON array
+    -- Step 5: Clean up staging buffer
+    -- Truncate RAM-based alerts_staging to reclaim memory
+    TRUNCATE alerts_staging;
+
+    -- Step 6: Send single NOTIFY payload with all affected subscription IDs
     IF array_length(sub_ids, 1) > 0 THEN
         PERFORM pg_notify(
                 'user_subscription_alerts',
@@ -379,6 +364,83 @@ BEGIN
     END IF;
 END;
 $$;
+
+CREATE TABLE subscription_targets(
+                                     subscription_id INT NOT NULL REFERENCES subscriptions (id),
+                                     target_id INT NOT NULL,
+                                     target_type target_type NOT NULL,
+                                     UNIQUE (subscription_id, target_id, target_type)
+);
+
+-- ============================================================================
+-- Procedure: recreate_subscription_targets
+-- Description:
+--     This procedure rebuilds the 'subscription_targets' table by iterating
+--     over all user subscriptions and extracting related target IDs (flights,
+--     source airports, destination airports) from each subscription view.
+--
+--     For each subscription:
+--         - The corresponding view is dynamically queried.
+--         - All distinct flight_id, source_airport_id, and destination_airport_id
+--           values are inserted into the 'subscription_targets' table along with
+--           the appropriate target_type and subscription_id.
+--
+--     NOTE:
+--         This procedure must be called whenever:
+--           1. A user subscription is created, updated, or deleted.
+--           2. The list of active flights (used in subscription views) changes.
+--
+--     It ensures that the 'subscription_targets' table always contains an
+--     up-to-date mapping of subscriptions to the targets they are monitoring.
+-- ============================================================================
+CREATE OR REPLACE PROCEDURE recreate_subscription_targets()
+    LANGUAGE plpgsql
+AS $$
+DECLARE
+    rec RECORD;
+    dyn_sql TEXT;
+BEGIN
+    -- Step 1: Clear existing data
+    TRUNCATE subscription_targets;
+
+    -- Step 2: Iterate over each subscription
+    FOR rec IN SELECT id, view_name FROM subscriptions LOOP
+            -- Step 3: Construct dynamic SQL for each subscription view
+            dyn_sql := format($fmt$
+            INSERT INTO subscription_targets(subscription_id, target_id, target_type)
+            SELECT DISTINCT %s, flight_id, 'flight'::target_type FROM %I
+            WHERE flight_id IS NOT NULL
+            UNION ALL
+            SELECT DISTINCT %s, source_airport_id, 'source_airport'::target_type FROM %I
+            WHERE source_airport_id IS NOT NULL
+            UNION ALL
+            SELECT DISTINCT %s, destination_airport_id, 'destination_airport'::target_type FROM %I
+            WHERE destination_airport_id IS NOT NULL;
+        $fmt$, rec.id, rec.view_name, rec.id, rec.view_name, rec.id, rec.view_name);
+            -- Step 4: insert targets from current subscription into subscription_targets
+            EXECUTE dyn_sql;
+        END LOOP;
+END;
+$$;
+
+CREATE OR REPLACE VIEW user_subscription_alerts AS
+SELECT
+    us.id AS user_subscription_id,
+    usc.condition_id,
+    a.id AS alert_id,
+    a.target_id,
+    ct.target_type,
+    a.is_on,
+    a.payload,
+    a.updated_at,
+    us.pushed_at,
+    usc.is_on usc_is_on
+FROM alerts a
+         JOIN conditions c ON a.condition_id = c.id
+         JOIN condition_templates ct ON ct.id = c.template_id
+         JOIN user_subscription_conditions usc ON usc.condition_id = a.condition_id
+         JOIN user_subscriptions us ON us.id = usc.user_subscription_id
+         JOIN subscription_targets st ON st.target_id = a.target_id AND st.target_type = ct.target_type AND st.subscription_id = us.subscription_id;
 
 CREATE OR REPLACE FUNCTION get_alerts_json(user_sub_id INT)
     RETURNS JSON AS $$
@@ -395,8 +457,9 @@ BEGIN
             'updated_at', updated_at
                     ))
     INTO alerts
-    FROM user_subscription_new_alerts
-    WHERE user_subscription_id = user_sub_id;
+    FROM user_subscription_alerts
+    WHERE user_subscription_id = user_sub_id
+      and usc_is_on = true  AND updated_at > COALESCE(pushed_at, '2000-01-01');
 
     IF alerts IS NULL THEN
         RETURN '[]'::json;

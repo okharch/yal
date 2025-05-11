@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -28,7 +27,6 @@ func main() {
 	defer dbpool.Close()
 
 	var subscriptionIDs []int
-	var targetViewParts []string
 
 	// 1. Get top 30 destination airports in the U.S.
 	routes, err := dbpool.Query(ctx, `
@@ -73,23 +71,6 @@ func main() {
 
 		subscriptionIDs = append(subscriptionIDs, id)
 
-		targetViewParts = append(targetViewParts, fmt.Sprintf(`
-		SELECT %d AS subscription_id, flight_id AS target_id, 'flight'::target_type AS target_type FROM %s
-		UNION ALL
-		SELECT %d, source_airport_id, 'source_airport'::target_type FROM %s
-		UNION ALL
-		SELECT %d, destination_airport_id, 'destination_airport'::target_type FROM %s
-		`, id, viewName, id, viewName, id, viewName))
-	}
-
-	// 1b. Create aggregated subscription_targets_view
-	viewBody := strings.Join(targetViewParts, "\nUNION ALL\n")
-	targetsViewSQL := fmt.Sprintf(`
-		CREATE OR REPLACE VIEW subscription_targets_view AS
-		%s
-	`, viewBody)
-	if _, err := dbpool.Exec(ctx, targetsViewSQL); err != nil {
-		log.Fatalf("Error creating subscription_targets_view: %v", err)
 	}
 
 	log.Println("✅ Subscriptions, views, and subscription_targets_view created.")
