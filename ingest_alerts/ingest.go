@@ -18,10 +18,7 @@ var AlertsFlushed = make(chan struct{})
 func IngestAlertData(ctx context.Context, pgxPool *pgxpool.Pool) {
 
 	started := time.Now()
-	_, err := pgxPool.Exec(ctx, `
-		TRUNCATE subscription_targets;
-		insert into subscription_targets(subscription_id, target_id, target_type) SELECT DISTINCT subscription_id, target_id, target_type FROM subscription_targets_view;
-	`)
+	_, err := pgxPool.Exec(ctx, `call recreate_subscription_targets()`)
 	if err != nil {
 		log.Fatalf("failed to create temp staging table: %v", err)
 	}
