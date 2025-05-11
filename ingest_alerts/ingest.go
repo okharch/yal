@@ -64,25 +64,14 @@ func IngestAlertData(ctx context.Context, pgxPool *pgxpool.Pool) {
 		}
 		start := time.Now()
 		// Merge into alerts table
-		_, err = pgxPool.Exec(ctx, "CALL process_alert_staging()")
-
-		if err != nil {
-			log.Printf("failed to update alerts_triggered_at: %v", err)
-		}
-		if err != nil {
-			log.Printf("failed to upsert into alerts: %v", err)
-			rows = rows[:0]
-			return
-		}
-		// find out size of alerts table before truncating
-		// SELECT pg_size_pretty(pg_table_size('alerts_staging')) AS data_size;
 		var size string
 		_ = pgxPool.QueryRow(ctx, `SELECT pg_size_pretty(pg_table_size('alerts_staging'))`).Scan(&size)
 
-		// Clean up alerts_staging
-		_, err = pgxPool.Exec(ctx, `TRUNCATE alerts_staging`)
+		_, err = pgxPool.Exec(ctx, "CALL process_alert_staging()")
+
 		if err != nil {
-			log.Printf("failed to truncate alerts_staging: %v", err)
+			log.Printf("failed to upsert into alerts: %v", err)
+			return
 		}
 
 		log.Printf("merged %d alert (%s) records in %s", toMerge, size, time.Since(start))
