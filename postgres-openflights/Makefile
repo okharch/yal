@@ -54,3 +54,6 @@ go-run-subscriptions:
 
 ingest:
 	go run ../cmd/mock_alerts
+
+listen:
+	go run ../cmd/listen_changes

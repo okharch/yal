@@ -11,9 +11,8 @@ import (
 )
 
 type ConditionChangePayload struct {
-	UserSubscriptionConditionID int  `json:"user_subscription_condition_id"`
-	UserSubscriptionID          int  `json:"user_subscription_id"`
-	IsOn                        bool `json:"is_on"`
+	Id   int  `json:"id"`
+	IsOn bool `json:"is_on"`
 }
 
 // ListenForConditionChanges listens on PostgreSQL pub/sub channel
@@ -51,7 +50,7 @@ func ListenForConditionChanges(ctx context.Context, dbConnStr string, db *pgxpoo
 			var payload ConditionChangePayload
 			err = json.Unmarshal([]byte(notification.Payload), &payload)
 			if err != nil {
-				log.Printf("failed to parse payload: %v", err)
+				log.Printf("failed to parse payload(%s): %v", notification.Payload, err)
 				continue
 			}
 
@@ -64,7 +63,6 @@ func ListenForConditionChanges(ctx context.Context, dbConnStr string, db *pgxpoo
 
 // handleConditionChange fetches alerts from the view and sends them directly as raw JSON.
 func handleConditionChange(ctx context.Context, db *pgxpool.Pool, payload ConditionChangePayload) {
-	userSubID := payload.UserSubscriptionID
 
 	var alertsJSON []byte
 	query := `
@@ -78,7 +76,7 @@ func handleConditionChange(ctx context.Context, db *pgxpool.Pool, payload Condit
 				'is_on', %s
 			))
 			FROM user_subscription_alerts
-			WHERE user_subscription_id = $1 AND is_on = true`
+			WHERE user_subscription_condition_id = $1 AND is_on = true`
 
 	if payload.IsOn {
 		// Normal: show active alerts as-is
@@ -88,18 +86,18 @@ func handleConditionChange(ctx context.Context, db *pgxpool.Pool, payload Condit
 		query = fmt.Sprintf(query, "false")
 	}
 
-	err := db.QueryRow(ctx, query, userSubID).Scan(&alertsJSON)
+	err := db.QueryRow(ctx, query, payload.Id).Scan(&alertsJSON)
 	if err != nil {
-		log.Printf("failed to fetch alerts for user_subscription_id=%d: %v", userSubID, err)
+		log.Printf("failed to fetch alerts for user_subscription_id=%d: %v", payload.Id, err)
 		return
 	}
 
 	if alertsJSON == nil {
-		log.Printf("No alerts to push for user_subscription_id=%d (is_on=%v)", userSubID, payload.IsOn)
+		log.Printf("No alerts to push for user_subscription_id=%d (is_on=%v)", payload.Id, payload.IsOn)
 		return
 	}
 
-	pushAlertsToFrontend(userSubID, alertsJSON)
+	pushAlertsToFrontend(payload.Id, alertsJSON)
 }
 
 // pushAlertsToFrontend simulates sending alerts to frontend.

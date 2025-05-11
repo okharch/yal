@@ -186,10 +186,9 @@ DECLARE
 BEGIN
     -- Construct a JSON payload containing the ID and new `is_on` status
     payload := json_build_object(
-            'user_subscription_condition_id', NEW.id,
-            'user_subscription_id', NEW.user_subscription_id,
+            'id', NEW.id,
             'is_on', NEW.is_on
-               );
+    );
 
     -- Notify the backend listener via PostgreSQL pub/sub
     PERFORM pg_notify('subscription_condition_changes', payload::text);
@@ -425,21 +424,22 @@ $$;
 
 CREATE OR REPLACE VIEW user_subscription_alerts AS
 SELECT
-    us.id AS user_subscription_id,
-    usc.condition_id,
     a.id AS alert_id,
+    a.condition_id,
     a.target_id,
-    ct.target_type,
     a.is_on,
     a.payload,
     a.updated_at,
+    us.id AS user_subscription_id,
+    usc.id AS user_subscription_condition_id,
+    ct.target_type,
     us.pushed_at,
     usc.is_on usc_is_on
 FROM alerts a
-         JOIN conditions c ON a.condition_id = c.id
-         JOIN condition_templates ct ON ct.id = c.template_id
-         JOIN user_subscription_conditions usc ON usc.condition_id = a.condition_id
-         JOIN user_subscriptions us ON us.id = usc.user_subscription_id
+         JOIN conditions c ON a.condition_id = c.id -- 1 alert : 1 condition
+         JOIN condition_templates ct ON ct.id = c.template_id -- 1 condition : 1 template
+         JOIN user_subscription_conditions usc ON usc.condition_id = a.condition_id -- see below, we have unique constraint on (user_subscription_id, condition_id)
+         JOIN user_subscriptions us ON us.id = usc.user_subscription_id -- 1 alert 1 user_subscription : 1 user_subscription_conditions
          JOIN subscription_targets st ON st.target_id = a.target_id AND st.target_type = ct.target_type AND st.subscription_id = us.subscription_id;
 
 CREATE OR REPLACE FUNCTION get_alerts_json(user_sub_id INT)
