@@ -188,7 +188,8 @@ BEGIN
     -- Construct a JSON payload containing the ID and new `is_on` status
     payload := json_build_object(
             'id', NEW.id,
-            'is_on', NEW.is_on
+            'is_on', NEW.is_on,
+            'user_subscription_id', NEW.user_subscription_id
     );
 
     -- Notify the backend listener via PostgreSQL pub/sub
