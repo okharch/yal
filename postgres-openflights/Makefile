@@ -3,6 +3,8 @@ IMAGE_NAME=postgres-openflights
 CONTAINER_NAME=postgres-openflights
 POSTGRES_PORT=5433
 SUBSCRIPTIONS_DIR=../cmd/mock_subscriptions
+IMPORT_FILES = airports.dat airlines.dat routes.dat planes.dat countries.dat
+
 
 .PHONY: build run clean rebuild psql logs shell status go-run-subscriptions ingest
 
@@ -57,3 +59,9 @@ ingest:
 
 listen:
 	go run ../cmd/listen_changes
+
+import: $(addprefix import/, $(IMPORT_FILES))
+
+import/%.dat:
+	@mkdir -p import
+	curl -s -o $@ https://raw.githubusercontent.com/jpatokal/openflights/master/data/$*.dat
