@@ -100,9 +100,3 @@ func handleConditionChange(ctx context.Context, db *pgxpool.Pool, payload Condit
 		LogPayload(payload, string(alertsJSON))
 	}
 }
-
-// pushAlertsToFrontend simulates sending alerts to frontend.
-// Replace this with actual WebSocket/message queue/etc.
-func LogPayload(payloadParams interface{}, jsonPayload string) {
-	log.Printf("PUSH to frontend [user_subscription_id=%+v, payload=%s]", payloadParams, jsonPayload) // ,
-}

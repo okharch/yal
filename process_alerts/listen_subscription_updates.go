@@ -55,6 +55,9 @@ func ListenForSubscriptionUpdates(ctx context.Context, dbConnStr string, db *pgx
 					log.Printf("error waiting for notification: %v", err)
 					continue
 				}
+				if ShowDebug {
+					fmt.Printf("=== ListenForSubscriptionUpdates Received notification: %+v\n", notification.Payload)
+				}
 
 				var payload NotificationPayload
 				err = json.Unmarshal([]byte(notification.Payload), &payload)
@@ -120,7 +123,7 @@ func ListenForSubscriptionUpdates(ctx context.Context, dbConnStr string, db *pgx
 					defer wg.Done()
 					json, err := fetchAlertsJSON(ctx, db, id)
 					if ShowDebug {
-						param := struct{ SubscriptionID int }{id}
+						param := struct{ UserSubId int }{id}
 						LogPayload(param, json)
 					}
 					if err != nil {
