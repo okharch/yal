@@ -7,42 +7,31 @@ This component is the **core database engine** of a high-performance, real-time 
 ## 📦 Features
 
 - **OpenFlights schema** extended with alerting logic.
-- Dockerized build with data preloaded from OpenFlights `.dat` files.
 - Realistic simulation of flight-based and airport-based conditions.
 - High-throughput ingestion using unlogged tables in RAM disk (`alerts_staging`).
 - Batched alert processing with notification broadcast using `pg_notify`.
 - Views and procedures to support real-time subscriptions and condition tracking.
+- `.dat` files in `import/` directory are automatically downloaded during `make import` or any full rebuild.
 
 ---
 
-## 🛠️ Build & Run
+## 🛠️ How to Build & Run
 
-To build and launch the PostgreSQL database with full schema, data, and mock subscriptions:
+Database setup and rebuild is handled from the **repository root** using the `Makefile`. Use:
 
 ```bash
 make rebuild
 ```
 
-This performs the following steps:
+This orchestrates the following:
 
-1. Builds the PostgreSQL image with OpenFlights data.
-2. Runs the container with a tmpfs-mounted `/ramdisk` (512MB).
-3. Initializes the schema (`initdb/01-init_schema.sql`).
-4. Loads OpenFlights data (`initdb/02-load-openflights-data.sql`).
-5. Seeds test conditions (`initdb/03-test-airport-feed.sql`).
-6. Runs `mock_subscriptions` Go program to prepare users and subscriptions.
+1. Downloads OpenFlights data files (if not present).
+2. Builds the PostgreSQL Docker image.
+3. Starts the container with a tmpfs-mounted `/ramdisk`.
+4. Initializes schema and loads OpenFlights data.
+5. Seeds test alert conditions and mock subscriptions.
 
-To generate and stress test alerts:
-
-```bash
-make ingest
-```
-
-This runs the `mock_alerts` generator which:
-- Inserts up to 120,000 alerts per cycle.
-- Merges and deduplicates them via a stored procedure (`process_alert_staging`).
-- Sends backend notifications for affected user subscriptions.
-- Fetches alerts per subscription in parallel.
+> For more details, see the top-level [`README.md`](../README.md).
 
 ---
 
@@ -61,13 +50,13 @@ This validates that a **PostgreSQL-based architecture** can meet real-time alert
 
 ## 🧠 Design Highlights
 
-| Component               | Description                                                                 |
-|------------------------|-----------------------------------------------------------------------------|
-| `alerts_staging`       | Unlogged RAM-disk table for temporary bulk ingest                           |
-| `process_alert_staging`| Stored procedure that deduplicates and merges alerts in bulk                |
-| `pg_notify` triggers   | Notify backend about affected subscriptions without polling                 |
-| `user_subscription_new_alerts` | View to fetch only new, unpushed alerts per user                    |
-| `get_alerts_json()`    | Efficient JSON serializer and push marker for subscription alerts           |
+| Component                     | Description                                                                 |
+|------------------------------|-----------------------------------------------------------------------------|
+| `alerts_staging`             | Unlogged RAM-disk table for temporary bulk ingest                           |
+| `process_alert_staging()`    | Stored procedure that deduplicates and merges alerts in bulk                |
+| `pg_notify` triggers         | Notify backend about affected subscriptions without polling                 |
+| `user_subscription_new_alerts` | View to fetch only new, unpushed alerts per user                          |
+| `get_alerts_json()`          | Efficient JSON serializer and push marker for subscription alerts           |
 
 ---
 
@@ -76,12 +65,15 @@ This validates that a **PostgreSQL-based architecture** can meet real-time alert
 ```text
 .
 ├── Dockerfile                 # Docker image based on postgres:latest
-├── Makefile                   # Build, run, and ingest automation
-├── import/*.dat               # OpenFlights source data files
-└── initdb/
-    ├── 01-init_schema.sql     # Base schema and procedures
-    ├── 02-load-openflights-data.sql
-    └── 03-test-airport-feed.sql
+├── import/                   # Auto-fetched OpenFlights source data files (.dat)
+│   ├── fetchdata.sh
+│   └── *.dat
+├── initdb/                   # Initialization SQL scripts
+│   ├── 01-init_schema.sql
+│   ├── 02-load-openflights-data.sql
+│   └── 03-test-airport-feed.sql
+├── shell/                    # Shell profile customization (e.g., .inputrc for psql)
+└── README.md                 # This file
 ```
 
 ---
