@@ -74,5 +74,9 @@ $(IMPORT_DIR)/%.dat:
 	curl -s -o $@ https://raw.githubusercontent.com/jpatokal/openflights/master/data/$*.dat
 
 ## 🐘 Connect to PostgreSQL using psql inside the container
-psql:
+dpsql:
 	docker exec -it $(CONTAINER_NAME) psql -U postgres -d postgres
+
+## 🐘 Connect to PostgreSQL using local psql client
+psql:
+	psql -h localhost -p $(POSTGRES_PORT) -U postgres -d postgres
