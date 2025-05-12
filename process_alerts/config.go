@@ -6,6 +6,6 @@ import (
 
 var ShowDebug bool
 
-func LogPayload(payloadParams interface{}, jsonPayload string) {
-	fmt.Printf("PUSH to frontend %+v\n payload=%s\n", payloadParams, jsonPayload) // ,
+func LogPushSubscription(UserSubId int, jsonPayload string) {
+	fmt.Printf("PUSH user_sub %d\npayload=%s\n", UserSubId, jsonPayload) // ,
 }

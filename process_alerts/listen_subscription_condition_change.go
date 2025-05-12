@@ -11,8 +11,9 @@ import (
 )
 
 type ConditionChangePayload struct {
-	Id   int  `json:"id"`
-	IsOn bool `json:"is_on"`
+	Id                 int  `json:"id"`
+	IsOn               bool `json:"is_on"`
+	UserSubscriptionId int  `json:"user_subscription_id"`
 }
 
 // ListenForConditionChanges listens on PostgreSQL pub/sub channel
@@ -97,6 +98,6 @@ func handleConditionChange(ctx context.Context, db *pgxpool.Pool, payload Condit
 		return
 	}
 	if ShowDebug {
-		LogPayload(payload, string(alertsJSON))
+		LogPushSubscription(payload.UserSubscriptionId, string(alertsJSON))
 	}
 }

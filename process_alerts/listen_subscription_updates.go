@@ -123,8 +123,7 @@ func ListenForSubscriptionUpdates(ctx context.Context, dbConnStr string, db *pgx
 					defer wg.Done()
 					json, err := fetchAlertsJSON(ctx, db, id)
 					if ShowDebug {
-						param := struct{ UserSubId int }{id}
-						LogPayload(param, json)
+						LogPushSubscription(id, json)
 					}
 					if err != nil {
 						log.Printf("failed to fetch alerts JSON for subscription %d: %v", id, err)
