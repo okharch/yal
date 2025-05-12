@@ -7,7 +7,7 @@ IMPORT_DIR = $(POSTGRES_DIR)/import
 IMPORT_FILES = airports.dat airlines.dat routes.dat planes.dat countries.dat
 SUBSCRIPTIONS_DIR = ./cmd/mock_subscriptions
 
-.PHONY: build run clean rebuild psql logs shell status go-run-subscriptions ingest listen import wait-for-db
+.PHONY: build run clean rebuild psql logs shell status go-run-subscriptions alerts listen import wait-for-db
 
 ## 🔨 Build the PostgreSQL Docker image
 build:
@@ -58,7 +58,7 @@ go-run-subscriptions:
 	go run $(SUBSCRIPTIONS_DIR)
 
 ## 🧪 Ingest mock alerts into the database
-ingest:
+alerts:
 	go run ./cmd/mock_alerts
 
 ## 👂 Listen to database change notifications
@@ -73,6 +73,6 @@ $(IMPORT_DIR)/%.dat:
 	@echo "⬇ Downloading $*.dat"
 	curl -s -o $@ https://raw.githubusercontent.com/jpatokal/openflights/master/data/$*.dat
 
-## 🐘 Connect to PostgreSQL using psql
+## 🐘 Connect to PostgreSQL using psql inside the container
 psql:
-	psql -h localhost -p $(POSTGRES_PORT) -U postgres -d postgres
+	docker exec -it $(CONTAINER_NAME) psql -U postgres -d postgres
