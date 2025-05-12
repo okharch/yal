@@ -9,3 +9,6 @@ COPY import/*.dat /import/
 
 # Run init SQL script on first container startup
 COPY initdb/*.sql /docker-entrypoint-initdb.d/
+
+# include .inputrc for better shell experience
+COPY shell/.inputrc /root/.inputrc
