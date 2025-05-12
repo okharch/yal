@@ -104,6 +104,7 @@ CREATE TABLE alerts (
                         id SERIAL PRIMARY KEY,
                         condition_id INT NOT NULL REFERENCES conditions(id),
                         target_id INT NOT NULL,
+                        target_type target_type NOT NULL,
                         is_on BOOL NOT NULL,
     received_at TIMESTAMPTZ NOT NULL,
     payload text NOT NULL,
@@ -313,10 +314,11 @@ BEGIN
          -- Only perform update if the 'is_on' state has changed
          -- to avoid unnecessary writes and reduce database churn
          upserted AS (
-             INSERT INTO alerts (condition_id, target_id, is_on, payload, received_at, updated_at)
+             INSERT INTO alerts (condition_id, target_id, target_type, is_on, payload, received_at, updated_at)
                  SELECT
                      s.condition_id,
                      s.target_id,
+                     ct.target_type,
                      s.is_on,
                      s.payload,
                      s.received_at,
@@ -330,18 +332,18 @@ BEGIN
                          updated_at = now(),
                          received_at = EXCLUDED.received_at
                      WHERE alerts.is_on IS DISTINCT FROM EXCLUDED.is_on
-                 RETURNING alerts.id, alerts.condition_id, alerts.target_id
+                 RETURNING alerts.id, alerts.condition_id, alerts.target_id, alerts.target_type
          )
 
     -- Step 3: Identify affected user subscriptions
     -- Only include subscriptions where the user actively listens (is_on = true)
     SELECT ARRAY(
-                   SELECT DISTINCT usc.user_subscription_id
-                   FROM upserted u
-                            JOIN user_subscription_conditions usc
-                                 ON usc.condition_id = u.condition_id
-                   WHERE usc.is_on = true
-           ) INTO sub_ids;
+       SELECT DISTINCT usc.user_subscription_id
+       FROM upserted a, user_subscription_conditions usc, user_subscriptions us, subscription_targets st
+       WHERE a.condition_id = usc.condition_id AND usc.user_subscription_id = us.id
+        AND  us.subscription_id=st.subscription_id AND st.target_id = a.target_id AND st.target_type = a.target_type
+       AND usc.is_on = true
+     ) INTO sub_ids;
 
     -- Step 4: Update alerts_triggered_at to mark activity
     UPDATE user_subscriptions us
@@ -432,15 +434,13 @@ SELECT
     a.updated_at,
     us.id AS user_subscription_id,
     usc.id AS user_subscription_condition_id,
-    ct.target_type,
+    a.target_type,
     us.pushed_at,
     usc.is_on usc_is_on
-FROM alerts a
-         JOIN conditions c ON a.condition_id = c.id -- 1 alert : 1 condition
-         JOIN condition_templates ct ON ct.id = c.template_id -- 1 condition : 1 template
-         JOIN user_subscription_conditions usc ON usc.condition_id = a.condition_id -- see below, we have unique constraint on (user_subscription_id, condition_id)
-         JOIN user_subscriptions us ON us.id = usc.user_subscription_id -- 1 alert 1 user_subscription : 1 user_subscription_conditions
-         JOIN subscription_targets st ON st.target_id = a.target_id AND st.target_type = ct.target_type AND st.subscription_id = us.subscription_id;
+FROM alerts a, user_subscription_conditions usc, user_subscriptions us, subscription_targets st
+WHERE a.condition_id = usc.condition_id AND usc.user_subscription_id = us.id -- 1 alert 1 user_subscription : 1 user_subscription_conditions
+ AND us.subscription_id = st.subscription_id AND st.target_id = a.target_id AND st.target_type = a.target_type
+;
 
 CREATE OR REPLACE FUNCTION get_alerts_json(user_sub_id INT)
     RETURNS JSON AS $$
@@ -459,7 +459,7 @@ BEGIN
     INTO alerts
     FROM user_subscription_alerts
     WHERE user_subscription_id = user_sub_id
-      and usc_is_on = true  AND updated_at > COALESCE(pushed_at, '2000-01-01');
+      and usc_is_on = true AND updated_at > COALESCE(pushed_at, '2000-01-01');
 
     IF alerts IS NULL THEN
         RETURN '[]'::json;
