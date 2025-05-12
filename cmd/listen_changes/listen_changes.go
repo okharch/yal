@@ -16,7 +16,7 @@ const dbConnStr = "postgresql://postgres@localhost:5433/postgres?sslmode=disable
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds) // Include milliseconds
-
+	process_alerts.ShowDebug = true
 	ctx, cancel := context.WithCancel(context.Background())
 	pool, err := pgxpool.New(ctx, dbConnStr)
 	if err != nil {

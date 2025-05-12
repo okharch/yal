@@ -96,12 +96,13 @@ func handleConditionChange(ctx context.Context, db *pgxpool.Pool, payload Condit
 		log.Printf("No alerts to push for user_subscription_id=%d (is_on=%v)", payload.Id, payload.IsOn)
 		return
 	}
-
-	pushAlertsToFrontend(payload.Id, alertsJSON)
+	if ShowDebug {
+		LogPayload(payload, string(alertsJSON))
+	}
 }
 
 // pushAlertsToFrontend simulates sending alerts to frontend.
 // Replace this with actual WebSocket/message queue/etc.
-func pushAlertsToFrontend(userSubscriptionID int, jsonPayload []byte) {
-	log.Printf("PUSH to frontend [user_subscription_id=%d, payload=%s]", userSubscriptionID, string(jsonPayload)) // ,
+func LogPayload(payloadParams interface{}, jsonPayload string) {
+	log.Printf("PUSH to frontend [user_subscription_id=%+v, payload=%s]", payloadParams, jsonPayload) // ,
 }
