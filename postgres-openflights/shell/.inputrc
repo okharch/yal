@@ -1,0 +1,21 @@
+# Enable arrow-key history search
+"\e[A": history-search-backward
+"\e[B": history-search-forward
+
+# Case-insensitive autocompletion
+set completion-ignore-case on
+
+# Show all possibilities for autocompletion immediately
+set show-all-if-ambiguous on
+TAB: menu-complete
+
+# Improve backspace behavior
+set convert-meta off
+set input-meta on
+set output-meta on
+set editing-mode emacs
+
+# Better history search
+set show-all-if-unmodified on
+set completion-map-case on
+
