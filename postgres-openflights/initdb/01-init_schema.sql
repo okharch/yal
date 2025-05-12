@@ -156,30 +156,36 @@ create table user_subscription_conditions
     last_changed_at TIMESTAMPTZ
 );
 
--- ================================================
+-- ================================================================
 -- Function: notify_subscription_condition_change
--- --------------------------------
+-- ------------------------------------------------
 -- Purpose:
---   Sends a lightweight notification when a user's
---   subscription condition (`user_subscription_conditions.is_on`)
+--   Sends a lightweight, real-time notification whenever a user's
+--   alert condition subscription (`user_subscription_conditions.is_on`)
 --   is updated.
 --
 -- Use Case:
---   When a user enables or disables a specific alert condition,
---   this trigger informs the backend in real-time, allowing it to:
---     - Reactively reload or clear active alerts
---     - Update internal state or caches
---     - Log user-initiated condition changes
+--   Triggered by an UPDATE to the `user_subscription_conditions` table,
+--   this function informs the backend of user-initiated condition changes.
+--   It allows the backend to:
+--     - Reactively enable or disable relevant alerts
+--     - Refresh internal condition state or in-memory caches
+--     - Audit or log subscription changes for diagnostics or analytics
 --
 -- Notification Channel:
 --   'subscription_condition_changes'
 --
--- Payload Example:
+-- Payload Example (JSON):
 --   {
---     "user_subscription_condition_id": 123,
---     "is_on": true
+--     "id": 123,                      -- user_subscription_condition_id
+--     "is_on": true,                  -- new condition state
+--     "user_subscription_id": 456     -- parent subscription ID
 --   }
--- ================================================
+--
+-- Notes:
+--   - This function is expected to be used as a trigger AFTER UPDATE
+--     on the `user_subscription_conditions` table.
+-- ================================================================
 CREATE OR REPLACE FUNCTION notify_subscription_condition_change()
     RETURNS TRIGGER AS $$
 DECLARE
@@ -280,22 +286,43 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- ================================================
+-- ================================================================
 -- Procedure: process_alert_staging
--- --------------------------------
+-- ------------------------------------------------
 -- Purpose:
---   - Efficiently process and merge alert condition changes
---     from the high-speed alerts_staging table.
---   - Only updates the 'alerts' table when 'is_on' status
---     has changed.
---   - Identifies and notifies affected user subscriptions.
---   - Clears the staging table after processing.
--- --------------------------------
+--   Processes and merges high-frequency alert condition changes
+--   from the `alerts_staging` buffer table into the persistent
+--   `alerts` table, ensuring minimal churn and maximal efficiency.
+--
+-- Responsibilities:
+--   - Deduplicates staged updates per (condition_id, target_id)
+--   - Conditionally updates `alerts` only if `is_on` changed
+--   - Resolves target_type via `condition_templates`
+--   - Identifies and notifies affected user subscriptions
+--   - Cleans up staging area after processing
+--
 -- Performance Features:
---   - Deduplication based on (condition_id, target_id)
---   - Conflict resolution via conditional UPSERT
---   - Operates entirely in-memory until final merge
--- ================================================
+--   - Operates entirely in-memory using CTEs
+--   - Uses `ON CONFLICT ... DO UPDATE` with conditional write
+--   - Notifies backend once with list of affected subscriptions
+--   - Staging buffer can be backed by a RAM-disk for speed
+--
+-- Notification Channel:
+--   'user_subscription_alerts'
+--
+-- NOTIFY Payload Example (JSON):
+--   {
+--     "user_subscription_ids": [42, 91, 204]
+--   }
+--
+-- Triggering Use Case:
+--   Called manually or via backend pipeline after bulk inserting
+--   new condition results into `alerts_staging`.
+--
+-- Side Effects:
+--   - Truncates `alerts_staging`
+--   - Updates `alerts_triggered_at` in `user_subscriptions`
+-- ================================================================
 CREATE OR REPLACE PROCEDURE process_alert_staging()
     LANGUAGE plpgsql
 AS $$
@@ -374,27 +401,42 @@ CREATE TABLE subscription_targets(
                                      UNIQUE (subscription_id, target_id, target_type)
 );
 
--- ============================================================================
+-- =============================================================================
 -- Procedure: recreate_subscription_targets
+-- -----------------------------------------------------------------------------
+-- Purpose:
+--   Rebuilds the `subscription_targets` table by resolving and extracting
+--   all monitored targets (flights, source airports, destination airports)
+--   from dynamic subscription views.
+--
 -- Description:
---     This procedure rebuilds the 'subscription_targets' table by iterating
---     over all user subscriptions and extracting related target IDs (flights,
---     source airports, destination airports) from each subscription view.
+--   - Each user subscription in the `subscriptions` table is associated with
+--     a view that determines which targets it monitors.
+--   - This procedure dynamically queries each view and inserts all distinct
+--     `flight_id`, `source_airport_id`, and `destination_airport_id` values
+--     into `subscription_targets` with the appropriate `target_type`.
+--   - The result is a flattened and query-efficient mapping of
+--     (subscription_id, target_id, target_type) used for alert resolution.
 --
---     For each subscription:
---         - The corresponding view is dynamically queried.
---         - All distinct flight_id, source_airport_id, and destination_airport_id
---           values are inserted into the 'subscription_targets' table along with
---           the appropriate target_type and subscription_id.
+-- When to Use:
+--   This procedure **must be called** whenever:
+--     1. A user subscription is added, updated, or removed.
+--     2. The contents of any subscription view change (e.g., due to flight updates).
 --
---     NOTE:
---         This procedure must be called whenever:
---           1. A user subscription is created, updated, or deleted.
---           2. The list of active flights (used in subscription views) changes.
+-- Guarantees:
+--   - `subscription_targets` reflects the latest state of all active subscriptions.
+--   - Enables efficient joins and filtering during alert fan-out.
 --
---     It ensures that the 'subscription_targets' table always contains an
---     up-to-date mapping of subscriptions to the targets they are monitoring.
--- ============================================================================
+-- Target Types Inserted:
+--   - 'flight'
+--   - 'source_airport'
+--   - 'destination_airport'
+--
+-- Implementation Notes:
+--   - Uses dynamic SQL to iterate over `subscriptions.view_name`.
+--   - Performs a full `TRUNCATE` before re-inserting target mappings.
+--   - Optimized for batch regeneration, not partial updates.
+-- =============================================================================
 CREATE OR REPLACE PROCEDURE recreate_subscription_targets()
     LANGUAGE plpgsql
 AS $$
@@ -443,6 +485,44 @@ WHERE a.condition_id = usc.condition_id AND usc.user_subscription_id = us.id -- 
  AND us.subscription_id = st.subscription_id AND st.target_id = a.target_id AND st.target_type = a.target_type
 ;
 
+-- =============================================================================
+-- Function: get_alerts_json(user_sub_id INT)
+-- -----------------------------------------------------------------------------
+-- Purpose:
+--   Fetches all **active and updated** alerts for a given user subscription
+--   and returns them as a JSON array. Only includes alerts that:
+--     - Belong to the specified user subscription
+--     - Have `usc_is_on = true` (i.e., condition is enabled)
+--     - Have `updated_at` newer than `pushed_at` (not yet delivered)
+--
+-- Behavior:
+--   - Returns alerts as an array of JSON objects, each containing:
+--       - alert_id
+--       - condition_id
+--       - target_id
+--       - target_type
+--       - is_on
+--       - payload (raw JSON from alert evaluator)
+--       - updated_at (last time alert was modified)
+--   - If no alerts qualify, returns an empty array: `[]`
+--   - Updates the `pushed_at` field in `user_subscriptions` to `now()`
+--     to mark alerts as delivered.
+--
+-- Return Type:
+--   JSON array of alert objects
+--
+-- Example Usage:
+--   SELECT get_alerts_json(42);
+--
+-- Use Case:
+--   - Called by backend systems or notification workers to fetch
+--     freshly updated alerts for push delivery.
+--
+-- Notes:
+--   - Should be called only when the caller is ready to "consume"
+--     and push alerts, as it advances the `pushed_at` timestamp.
+--   - Ensures idempotent client behavior by skipping already pushed alerts.
+-- =============================================================================
 CREATE OR REPLACE FUNCTION get_alerts_json(user_sub_id INT)
     RETURNS JSON AS $$
 DECLARE
