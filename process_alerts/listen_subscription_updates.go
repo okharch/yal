@@ -117,7 +117,7 @@ func ListenForSubscriptionUpdates(ctx context.Context, dbConnStr string, db *pgx
 		go func() {
 			started := time.Now()
 			var wg sync.WaitGroup
-			for id := range subscriptionIDs {
+			for _, id := range subscriptionIDs {
 				wg.Add(1)
 				go func(id int) {
 					defer wg.Done()
