@@ -76,7 +76,7 @@ On a modern CPU:
 Run the full ingestion + listener with:
 
 ```bash
-make ingest
+make alert
 ```
 
 ---
